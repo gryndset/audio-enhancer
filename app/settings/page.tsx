@@ -1,320 +1,292 @@
-"use client";
+'use client'
+import { useState, useEffect } from 'react'
+import { testDolbyConnection } from '@/lib/dolby'
+import { testWhisperConnection, WhisperEngine } from '@/lib/whisper'
+import { SummaryMode } from '@/lib/summarize'
+import ToastContainer from '@/components/ToastContainer'
+import { useToast } from '@/hooks/useToast'
 
-import { useState, useEffect } from "react";
-import Link from "next/link";
-import {
-  ArrowLeft, Eye, EyeOff, Save, Trash2, ExternalLink,
-  Music2, History, CheckCircle, XCircle, Loader, Download, Upload,
-} from "lucide-react";
-import { useTheme } from "@/hooks/useTheme";
-import ThemeSwitcher from "@/components/ThemeSwitcher";
-import ToastContainer from "@/components/ToastContainer";
-import { showToast } from "@/hooks/useToast";
-// FIX #4: testDolbyKey のシグネチャが (appKey, appSecret) に変更されたため更新
-import { testDolbyKey } from "@/lib/dolby";
-import { testOpenAIKey } from "@/lib/whisper";
+interface Settings {
+  dolbyKey: string; dolbySecret: string
+  whisperEngine: WhisperEngine; whisperKey: string; openaiKey: string
+  language: string; noiseReduction: 'low'|'medium'|'high'
+  chunkMinutes: number; overlapSeconds: number
+  removeFiller: boolean; customVocab: string; nightMode: boolean
+  enableDolby: boolean; enableSummary: boolean; summaryMode: SummaryMode
+}
 
-type TestState = "idle" | "testing" | "ok" | "error";
-
-interface TestResult {
-  state: TestState;
-  message?: string;
+function defaultSettings(): Settings {
+  return { dolbyKey:'', dolbySecret:'', whisperEngine:'groq', whisperKey:'', openaiKey:'',
+    language:'ja', noiseReduction:'medium', chunkMinutes:5, overlapSeconds:30,
+    removeFiller:false, customVocab:'', nightMode:false,
+    enableDolby:true, enableSummary:true, summaryMode:'lecture' }
 }
 
 export default function SettingsPage() {
-  const { theme, changeTheme } = useTheme();
-
-  // FIX #4: dolbyKey 単体 → dolbyAppKey + dolbyAppSecret の2フィールドに変更
-  const [dolbyAppKey, setDolbyAppKey] = useState("");
-  const [dolbyAppSecret, setDolbyAppSecret] = useState("");
-  const [openaiKey, setOpenaiKey] = useState("");
-  const [showDolbySecret, setShowDolbySecret] = useState(false);
-  const [showOpenai, setShowOpenai] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [dolbyTest, setDolbyTest] = useState<TestResult>({ state: "idle" });
-  const [openaiTest, setOpenaiTest] = useState<TestResult>({ state: "idle" });
+  const [s, setS] = useState<Settings>(defaultSettings)
+  const [testing, setTesting] = useState<Record<string,boolean>>({})
+  const { toasts, addToast, removeToast } = useToast()
 
   useEffect(() => {
-    setDolbyAppKey(localStorage.getItem("dolby_app_key") ?? "");
-    setDolbyAppSecret(localStorage.getItem("dolby_app_secret") ?? "");
-    setOpenaiKey(localStorage.getItem("openai_api_key") ?? "");
-  }, []);
+    try {
+      const saved = localStorage.getItem('ac_settings_v4')
+      if (saved) setS({ ...defaultSettings(), ...JSON.parse(saved) })
+    } catch {}
+  }, [])
 
-  function handleSave() {
-    localStorage.setItem("dolby_app_key", dolbyAppKey.trim());
-    localStorage.setItem("dolby_app_secret", dolbyAppSecret.trim());
-    localStorage.setItem("openai_api_key", openaiKey.trim());
-    setSaved(true);
-    showToast("保存しました", "success");
-    setTimeout(() => setSaved(false), 2000);
-    setDolbyTest({ state: "idle" });
-    setOpenaiTest({ state: "idle" });
+  const save = (patch: Partial<Settings>) => {
+    const next = { ...s, ...patch }
+    setS(next)
+    localStorage.setItem('ac_settings_v4', JSON.stringify(next))
   }
 
-  function handleClear() {
-    if (!confirm("APIキーをすべてクリアしますか？")) return;
-    localStorage.removeItem("dolby_app_key");
-    localStorage.removeItem("dolby_app_secret");
-    localStorage.removeItem("openai_api_key");
-    setDolbyAppKey("");
-    setDolbyAppSecret("");
-    setOpenaiKey("");
-    setDolbyTest({ state: "idle" });
-    setOpenaiTest({ state: "idle" });
-    showToast("クリアしました", "info");
+  const exportSettings = () => {
+    const safe = { ...s, dolbyKey:'', dolbySecret:'', whisperKey:'', openaiKey:'' }
+    const blob = new Blob([JSON.stringify(safe, null, 2)], { type:'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href=url; a.download='audioclear-settings.json'; a.click()
+    URL.revokeObjectURL(url)
   }
 
-  async function handleTestDolby() {
-    if (!dolbyAppKey.trim() || !dolbyAppSecret.trim()) {
-      showToast("App Key と App Secret を両方入力してください", "error");
-      return;
-    }
-    setDolbyTest({ state: "testing" });
-    const result = await testDolbyKey(dolbyAppKey.trim(), dolbyAppSecret.trim());
-    setDolbyTest({ state: result.ok ? "ok" : "error", message: result.error });
-  }
-
-  async function handleTestOpenAI() {
-    if (!openaiKey.trim()) { showToast("APIキーを入力してください", "error"); return; }
-    setOpenaiTest({ state: "testing" });
-    const result = await testOpenAIKey(openaiKey.trim());
-    setOpenaiTest({ state: result.ok ? "ok" : "error", message: result.error });
-  }
-
-  function handleExport() {
-    if (!dolbyAppKey && !dolbyAppSecret && !openaiKey) {
-      showToast("保存されているAPIキーがありません", "error");
-      return;
-    }
-    const data = JSON.stringify({
-      dolby_app_key: dolbyAppKey,
-      dolby_app_secret: dolbyAppSecret,
-      openai_api_key: openaiKey,
-    }, null, 2);
-    const blob = new Blob([data], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "audioclear_keys.json";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast("エクスポートしました", "success");
-  }
-
-  function handleImport(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
+  const importSettings = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
       try {
-        const json = JSON.parse(ev.target?.result as string);
-        if (json.dolby_app_key) setDolbyAppKey(json.dolby_app_key);
-        if (json.dolby_app_secret) setDolbyAppSecret(json.dolby_app_secret);
-        if (json.openai_api_key) setOpenaiKey(json.openai_api_key);
-        showToast("インポートしました。「保存」を押して確定してください", "info");
-      } catch {
-        showToast("ファイルの読み込みに失敗しました", "error");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
+        const data = JSON.parse(ev.target?.result as string)
+        save(data)
+        addToast('設定をインポートしました', 'success')
+      } catch { addToast('JSONの読み込みに失敗しました', 'error') }
+    }
+    reader.readAsText(file)
   }
+
+  const testDolby = async () => {
+    if (!s.dolbyKey || !s.dolbySecret) return addToast('App KeyとApp Secretを入力してください', 'error')
+    setTesting(t => ({ ...t, dolby: true }))
+    const ok = await testDolbyConnection(s.dolbyKey, s.dolbySecret)
+    setTesting(t => ({ ...t, dolby: false }))
+    addToast(ok ? 'Dolby接続成功 ✓' : 'Dolby接続失敗 - キーを確認してください', ok?'success':'error')
+  }
+
+  const testWhisper = async () => {
+    if (!s.whisperKey) return addToast('APIキーを入力してください', 'error')
+    setTesting(t => ({ ...t, whisper: true }))
+    const ok = await testWhisperConnection(s.whisperEngine, s.whisperKey)
+    setTesting(t => ({ ...t, whisper: false }))
+    addToast(ok ? `${s.whisperEngine}接続成功 ✓` : '接続失敗 - キーを確認してください', ok?'success':'error')
+  }
+
+  const Toggle = ({ value, onChange }: { value: boolean; onChange: (v:boolean)=>void }) => (
+    <div className={`toggle${value?' on':''}`} onClick={() => onChange(!value)} style={{ cursor:'pointer' }} />
+  )
+
+  const SectionTitle = ({ title }: { title: string }) => (
+    <div className="s-tag" style={{ marginBottom:16 }}>{title}</div>
+  )
 
   return (
-    <div style={{ minHeight: "100vh", background: "var(--bg-primary)", paddingBottom: "5rem" }}>
-      <ToastContainer />
+    <>
+      <nav>
+        <a href="/" style={{ textDecoration:'none' }}>
+          <div className="nav-logo-main">AudioClear</div>
+          <div className="nav-logo-sub">Settings</div>
+        </a>
+        <ul className="nav-links">
+          <li><a href="/">ホーム</a></li>
+          <li><a href="/history">履歴</a></li>
+        </ul>
+        <a href="/" className="nav-cta">← 戻る</a>
+      </nav>
 
-      <header style={{
-        background: "var(--bg-card)",
-        borderBottom: "1px solid var(--border)",
-        padding: "0.875rem 1.25rem",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        position: "sticky",
-        top: 0,
-        zIndex: 50,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          <Link href="/" style={{ color: "var(--text-secondary)", display: "flex" }}>
-            <ArrowLeft size={20} />
-          </Link>
-          <span style={{ fontWeight: 700, fontSize: "1rem" }} className="label-upper">設定</span>
+      <main style={{ maxWidth:760, margin:'0 auto', padding:'88px 40px 80px' }}>
+        <div style={{ marginBottom:40 }}>
+          <h1 className="s-h2">設定</h1>
+          <p className="s-sub">APIキーはブラウザのlocalStorageにのみ保存されます。サーバーには送信されません。</p>
         </div>
-        <ThemeSwitcher theme={theme} onChange={changeTheme} />
-      </header>
 
-      <main style={{ maxWidth: 600, margin: "0 auto", padding: "1.5rem 1rem" }}>
-
-        {/* Dolby.io — FIX #4: App Key + App Secret の2フィールドUI */}
-        <div className="card" style={{ marginBottom: "1rem" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
-            <div>
-              <p style={{ fontWeight: 700, marginBottom: "0.25rem" }}>Dolby.io API</p>
-              <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>音質強化・ノイズ除去に使用（月10時間まで無料）</p>
+        {/* Dolby */}
+        <div className="card" style={{ marginBottom:16 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
+            <SectionTitle title="Dolby.io 音質強化" />
+            <div className="toggle-wrap">
+              <Toggle value={s.enableDolby} onChange={v => save({ enableDolby: v })} />
+              <span className="toggle-label" style={{ fontSize:11 }}>{s.enableDolby ? '有効' : '無効'}</span>
             </div>
-            <a href="https://dashboard.dolby.io/" target="_blank" rel="noopener noreferrer"
-              style={{ color: "var(--accent-primary)", display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem" }}>
-              取得 <ExternalLink size={12} />
-            </a>
           </div>
 
-          {/* App Key */}
-          <p style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginBottom: "0.375rem", fontWeight: 500 }}>App Key</p>
-          <div style={{ position: "relative", marginBottom: "0.75rem" }}>
-            <input
-              className="input-field"
-              type="text"
-              value={dolbyAppKey}
-              onChange={(e) => { setDolbyAppKey(e.target.value); setDolbyTest({ state: "idle" }); }}
-              placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-            />
-          </div>
+          {s.enableDolby && (
+            <>
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:12 }}>
+                <div>
+                  <label className="input-label">App Key</label>
+                  <input className="input-field" type="password" placeholder="your-app-key" value={s.dolbyKey} onChange={e => save({ dolbyKey: e.target.value })} />
+                </div>
+                <div>
+                  <label className="input-label">App Secret</label>
+                  <input className="input-field" type="password" placeholder="your-app-secret" value={s.dolbySecret} onChange={e => save({ dolbySecret: e.target.value })} />
+                </div>
+              </div>
+              <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:16 }}>
+                <button className="btn-ghost" style={{ fontSize:9, padding:'6px 14px' }} onClick={testDolby} disabled={testing.dolby}>
+                  {testing.dolby ? '接続テスト中...' : '接続テスト'}
+                </button>
+                <span style={{ fontFamily:'DM Mono,monospace', fontSize:9, color:'var(--t3)' }}>
+                  取得先: dashboard.dolby.io → Applications → API Keys
+                </span>
+              </div>
+              <div>
+                <label className="input-label">ノイズ除去強度</label>
+                <div className="radio-group">
+                  {(['low','medium','high'] as const).map(v => (
+                    <div key={v} className={`radio-opt${s.noiseReduction===v?' selected':''}`} onClick={() => save({ noiseReduction: v })}>
+                      <div className="radio-dot" />
+                      <div>
+                        <div className="radio-text">{v==='low'?'弱':v==='medium'?'中':'強'}</div>
+                        <div className="radio-sub">{v==='low'?'自然な音を保ちつつ軽くノイズ除去':v==='medium'?'授業・会議録音に推奨':'ホワイトノイズが強い環境向け'}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
 
-          {/* App Secret */}
-          <p style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginBottom: "0.375rem", fontWeight: 500 }}>App Secret</p>
-          <div style={{ position: "relative", marginBottom: "0.625rem" }}>
-            <input
-              className="input-field"
-              type={showDolbySecret ? "text" : "password"}
-              value={dolbyAppSecret}
-              onChange={(e) => { setDolbyAppSecret(e.target.value); setDolbyTest({ state: "idle" }); }}
-              placeholder="••••••••••••••••••••••••••••••••"
-              style={{ paddingRight: "3rem" }}
-            />
-            <button onClick={() => setShowDolbySecret(!showDolbySecret)} style={{
-              position: "absolute", right: "0.75rem", top: "50%", transform: "translateY(-50%)",
-              background: "none", border: "none", cursor: "pointer", color: "var(--text-secondary)", display: "flex",
-            }}>
-              {showDolbySecret ? <EyeOff size={16} /> : <Eye size={16} />}
+        {/* Whisper */}
+        <div className="card" style={{ marginBottom:16 }}>
+          <SectionTitle title="文字起こしエンジン" />
+          <div className="radio-group" style={{ marginBottom:16 }}>
+            {([
+              { v:'groq', label:'Groq Whisper', sub:'無料枠あり・高速・推奨。api.groq.com でキー発行（クレカ不要）' },
+              { v:'openai', label:'OpenAI Whisper', sub:'$0.006/分。高品質。platform.openai.com でキー発行' },
+            ] as const).map(opt => (
+              <div key={opt.v} className={`radio-opt${s.whisperEngine===opt.v?' selected':''}`} onClick={() => save({ whisperEngine: opt.v })}>
+                <div className="radio-dot" />
+                <div>
+                  <div className="radio-text">{opt.label}</div>
+                  <div className="radio-sub">{opt.sub}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginBottom:12 }}>
+            <label className="input-label">{s.whisperEngine === 'groq' ? 'Groq' : 'OpenAI'} APIキー</label>
+            <input className="input-field" type="password" placeholder="sk-..." value={s.whisperKey} onChange={e => save({ whisperKey: e.target.value })} />
+          </div>
+          <div style={{ display:'flex', gap:10, marginBottom:16 }}>
+            <button className="btn-ghost" style={{ fontSize:9, padding:'6px 14px' }} onClick={testWhisper} disabled={testing.whisper}>
+              {testing.whisper ? '接続テスト中...' : '接続テスト'}
             </button>
           </div>
-          <TestButton state={dolbyTest} onTest={handleTestDolby} />
-        </div>
 
-        {/* OpenAI */}
-        <div className="card" style={{ marginBottom: "1rem" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
             <div>
-              <p style={{ fontWeight: 700, marginBottom: "0.25rem" }}>OpenAI API Key</p>
-              <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>文字起こし（Whisper）に使用。90分 ≈ ¥80</p>
+              <label className="input-label">言語</label>
+              <select className="select-field" value={s.language} onChange={e => save({ language: e.target.value })}>
+                <option value="ja">日本語</option>
+                <option value="en">English</option>
+                <option value="auto">自動検出</option>
+                <option value="zh">中文</option>
+                <option value="ko">한국어</option>
+              </select>
             </div>
-            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer"
-              style={{ color: "var(--accent-primary)", display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem" }}>
-              取得 <ExternalLink size={12} />
-            </a>
+            <div>
+              <label className="input-label">チャンク長（分）</label>
+              <select className="select-field" value={s.chunkMinutes} onChange={e => save({ chunkMinutes: Number(e.target.value) })}>
+                <option value={3}>3分（高精度）</option>
+                <option value={5}>5分（推奨）</option>
+                <option value={10}>10分（高速）</option>
+              </select>
+            </div>
           </div>
-          <div style={{ position: "relative", marginBottom: "0.625rem" }}>
-            <input
-              className="input-field"
-              type={showOpenai ? "text" : "password"}
-              value={openaiKey}
-              onChange={(e) => { setOpenaiKey(e.target.value); setOpenaiTest({ state: "idle" }); }}
-              placeholder="sk-proj-..."
-              style={{ paddingRight: "3rem" }}
-            />
-            <button onClick={() => setShowOpenai(!showOpenai)} style={{
-              position: "absolute", right: "0.75rem", top: "50%", transform: "translateY(-50%)",
-              background: "none", border: "none", cursor: "pointer", color: "var(--text-secondary)", display: "flex",
-            }}>
-              {showOpenai ? <EyeOff size={16} /> : <Eye size={16} />}
-            </button>
+        </div>
+
+        {/* Advanced */}
+        <div className="card" style={{ marginBottom:16 }}>
+          <SectionTitle title="詳細設定" />
+          <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+            <div className="toggle-wrap">
+              <Toggle value={s.removeFiller} onChange={v => save({ removeFiller: v })} />
+              <div>
+                <div className="toggle-label">フィラーワード除去</div>
+                <div style={{ fontSize:11, color:'var(--t3)' }}>えー、あのー、えっと、などを自動除去</div>
+              </div>
+            </div>
+            <div className="toggle-wrap">
+              <Toggle value={s.nightMode} onChange={v => save({ nightMode: v })} />
+              <div>
+                <div className="toggle-label">🌙 夜間モード（高精度）</div>
+                <div style={{ fontSize:11, color:'var(--t3)' }}>各チャンクを2回処理して精度UP。処理時間が2倍になります</div>
+              </div>
+            </div>
+            <div>
+              <label className="input-label">カスタム語彙（専門用語・人名をカンマ区切りで）</label>
+              <input className="input-field" placeholder="例: 微分方程式, 量子力学, 田中教授" value={s.customVocab} onChange={e => save({ customVocab: e.target.value })} />
+            </div>
           </div>
-          <TestButton state={openaiTest} onTest={handleTestOpenAI} />
         </div>
 
-        <div style={{
-          padding: "0.875rem 1rem",
-          background: "var(--bg-secondary)",
-          borderRadius: "var(--radius-card)",
-          border: "1px solid var(--border)",
-          fontSize: "0.8rem",
-          color: "var(--text-secondary)",
-          marginBottom: "1.5rem",
-          lineHeight: 1.6,
-        }}>
-          🔒 APIキーはブラウザのlocalStorageにのみ保存されます。サーバーには一切送信されません。
+        {/* Summary */}
+        <div className="card" style={{ marginBottom:16 }}>
+          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
+            <SectionTitle title="AI 要約" />
+            <div className="toggle-wrap">
+              <Toggle value={s.enableSummary} onChange={v => save({ enableSummary: v })} />
+              <span className="toggle-label" style={{ fontSize:11 }}>{s.enableSummary ? '有効' : '無効'}</span>
+            </div>
+          </div>
+          {s.enableSummary && (
+            <>
+              <div style={{ marginBottom:16 }}>
+                <label className="input-label">OpenAI APIキー（要約に使用）</label>
+                <input className="input-field" type="password" placeholder="sk-..." value={s.openaiKey} onChange={e => save({ openaiKey: e.target.value })} />
+                <div style={{ fontFamily:'DM Mono,monospace', fontSize:9, color:'var(--t3)', marginTop:6 }}>
+                  GPT-4o-miniを使用。90分録音で約$0.01〜0.02。
+                </div>
+              </div>
+              <div>
+                <label className="input-label">要約モード</label>
+                <div className="radio-group">
+                  {([
+                    { v:'lecture', label:'授業・講義', sub:'要点・キーワード・試験ポイント・次回引き継ぎ' },
+                    { v:'meeting', label:'会議・ミーティング', sub:'サマリー・決定事項・アクションアイテム' },
+                    { v:'care', label:'介護・ケア記録', sub:'本日の様子・重要記録・申し送り事項' },
+                    { v:'general', label:'汎用', sub:'内容の要点・重要ポイント・振り返り' },
+                  ] as const).map(opt => (
+                    <div key={opt.v} className={`radio-opt${s.summaryMode===opt.v?' selected':''}`} onClick={() => save({ summaryMode: opt.v })}>
+                      <div className="radio-dot" />
+                      <div>
+                        <div className="radio-text">{opt.label}</div>
+                        <div className="radio-sub">{opt.sub}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
-        <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1rem" }}>
-          <button className="btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={handleSave}>
-            <Save size={16} />
-            {saved ? "保存しました ✓" : "保存"}
-          </button>
-          <button className="btn-secondary" onClick={handleClear}>
-            <Trash2 size={16} />
-            クリア
-          </button>
+        {/* Export/Import */}
+        <div className="card" style={{ marginBottom:16 }}>
+          <SectionTitle title="設定のエクスポート / インポート" />
+          <div style={{ display:'flex', gap:10 }}>
+            <button className="btn-ghost" onClick={exportSettings}>↓ エクスポート（APIキー除く）</button>
+            <label className="btn-ghost" style={{ cursor:'pointer' }}>
+              ↑ インポート
+              <input type="file" accept=".json" style={{ display:'none' }} onChange={importSettings} />
+            </label>
+          </div>
         </div>
 
-        <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1.5rem" }}>
-          <button className="btn-secondary" style={{ flex: 1, justifyContent: "center" }} onClick={handleExport}>
-            <Download size={15} /> エクスポート
-          </button>
-          <label className="btn-secondary" style={{ flex: 1, justifyContent: "center", cursor: "pointer" }}>
-            <Upload size={15} /> インポート
-            <input type="file" accept=".json" style={{ display: "none" }} onChange={handleImport} />
-          </label>
-        </div>
-
-        <div className="card">
-          <p style={{ fontWeight: 600, marginBottom: "0.75rem", fontSize: "0.9rem" }} className="label-upper">料金目安</p>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.85rem" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                <th style={{ textAlign: "left", padding: "0.5rem 0", color: "var(--text-secondary)", fontWeight: 500 }}>API</th>
-                <th style={{ textAlign: "left", padding: "0.5rem 0", color: "var(--text-secondary)", fontWeight: 500 }}>料金</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                <td style={{ padding: "0.625rem 0" }}>Dolby.io Enhance</td>
-                <td style={{ padding: "0.625rem 0", color: "var(--accent-primary)", fontWeight: 600 }}>月10時間まで無料</td>
-              </tr>
-              <tr>
-                <td style={{ padding: "0.625rem 0" }}>OpenAI Whisper</td>
-                <td style={{ padding: "0.625rem 0" }}>$0.006/分 → 90分 ≈ ¥80</td>
-              </tr>
-            </tbody>
-          </table>
+        <div style={{ display:'flex', gap:10, marginTop:24 }}>
+          <a href="/" className="btn-primary">← ホームへ戻る</a>
         </div>
       </main>
 
-      <nav className="bottom-nav">
-        <Link href="/"><Music2 size={20} /><span>メイン</span></Link>
-        <Link href="/history"><History size={20} /><span>履歴</span></Link>
-        <Link href="/settings" className="active"><Save size={20} /><span>設定</span></Link>
-      </nav>
-    </div>
-  );
-}
-
-function TestButton({ state, onTest }: { state: TestResult; onTest: () => void }) {
-  const icons = {
-    idle: null,
-    testing: <Loader size={13} style={{ animation: "spin 1s linear infinite" }} />,
-    ok: <CheckCircle size={13} color="#22c55e" />,
-    error: <XCircle size={13} color="#ef4444" />,
-  };
-  const labels = { idle: "接続テスト", testing: "テスト中...", ok: "接続OK", error: "接続失敗" };
-
-  return (
-    <div>
-      <button
-        className="btn-secondary"
-        style={{ fontSize: "0.8rem", padding: "0.375rem 0.75rem", display: "flex", alignItems: "center", gap: "0.375rem" }}
-        onClick={onTest}
-        disabled={state.state === "testing"}
-      >
-        {icons[state.state]}
-        {labels[state.state]}
-      </button>
-      {state.state === "error" && state.message && (
-        <p style={{ fontSize: "0.75rem", color: "#ef4444", marginTop: "0.375rem" }}>{state.message}</p>
-      )}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-    </div>
-  );
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
+    </>
+  )
 }

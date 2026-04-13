@@ -1,521 +1,455 @@
-"use client";
-
-import { useState, useCallback, useRef } from "react";
-import Link from "next/link";
-import {
-  Settings, History, Sparkles, Music2, X, Plus, ChevronDown, ChevronUp,
-} from "lucide-react";
-import { useTheme } from "@/hooks/useTheme";
-import { showToast } from "@/hooks/useToast";
-import ThemeSwitcher from "@/components/ThemeSwitcher";
-import ToastContainer from "@/components/ToastContainer";
-import DropZone from "@/components/DropZone";
-import ProgressSteps, { Step } from "@/components/ProgressSteps";
-import ResultPanel from "@/components/ResultPanel";
-import { convertAudio, splitAudio, mergeAudio, WHISPER_LIMIT_BYTES, CHUNK_MINUTES } from "@/lib/ffmpeg";
-// FIX #4: enhanceAudio のシグネチャが (blob, appKey, appSecret, ...) に変更
-import { enhanceAudio } from "@/lib/dolby";
-import { transcribeAudio, segmentsToText, TranscriptSegment } from "@/lib/whisper";
-import { saveHistory } from "@/lib/db";
-
-type OutputFormat = "mp3" | "wav";
-type ItemStatus = "queued" | "processing" | "done" | "error" | "cancelled";
+'use client'
+import { useState, useRef, useCallback } from 'react'
+import DropZone from '@/components/DropZone'
+import ProgressSteps, { Step, StepStatus } from '@/components/ProgressSteps'
+import AudioPlayer from '@/components/AudioPlayer'
+import TranscriptViewer from '@/components/TranscriptViewer'
+import SummaryPanel from '@/components/SummaryPanel'
+import ToastContainer from '@/components/ToastContainer'
+import { useToast } from '@/hooks/useToast'
+import { useWakeLock } from '@/hooks/useWakeLock'
+import { enhanceAudio, testDolbyConnection } from '@/lib/dolby'
+import { transcribeAudio, TranscriptSegment, WhisperEngine } from '@/lib/whisper'
+import { generateSummary, SummaryMode, SummaryResult } from '@/lib/summarize'
+import { saveHistory, fileToBase64, base64ToBlob, formatBytes, formatDuration } from '@/lib/db'
 
 interface QueueItem {
-  id: string;
-  file: File;
-  status: ItemStatus;
-  steps: Step[];
-  error?: string;
-  enhancedBlob?: Blob | null;
-  transcript?: string | null;
-  expanded: boolean;
+  id: string
+  file: File
+  status: 'pending' | 'processing' | 'done' | 'error'
+  result?: ProcessResult
+  error?: string
 }
 
-const INITIAL_STEPS: Step[] = [
-  { label: "変換中", progress: 0, status: "waiting" },
-  { label: "音質強化中", progress: 0, status: "waiting" },
-  { label: "文字起こし中", progress: 0, status: "waiting" },
-];
+interface ProcessResult {
+  enhancedUrl: string | null
+  enhancedMime: string
+  transcript: TranscriptSegment[]
+  summary: SummaryResult | null
+  processingTime: number
+}
 
-function getApiKeys() {
+interface Settings {
+  dolbyKey: string
+  dolbySecret: string
+  whisperEngine: WhisperEngine
+  whisperKey: string
+  openaiKey: string
+  language: string
+  noiseReduction: 'low' | 'medium' | 'high'
+  chunkMinutes: number
+  overlapSeconds: number
+  removeFiller: boolean
+  customVocab: string
+  nightMode: boolean
+  enableDolby: boolean
+  enableSummary: boolean
+  summaryMode: SummaryMode
+}
+
+function loadSettings(): Settings {
+  if (typeof window === 'undefined') return defaultSettings()
+  try {
+    const s = localStorage.getItem('ac_settings_v4')
+    return s ? { ...defaultSettings(), ...JSON.parse(s) } : defaultSettings()
+  } catch { return defaultSettings() }
+}
+
+function defaultSettings(): Settings {
   return {
-    dolbyAppKey: typeof window !== "undefined" ? localStorage.getItem("dolby_app_key") ?? "" : "",
-    dolbyAppSecret: typeof window !== "undefined" ? localStorage.getItem("dolby_app_secret") ?? "" : "",
-    openai: typeof window !== "undefined" ? localStorage.getItem("openai_api_key") ?? "" : "",
-  };
+    dolbyKey: '', dolbySecret: '', whisperEngine: 'groq', whisperKey: '', openaiKey: '',
+    language: 'ja', noiseReduction: 'medium', chunkMinutes: 5, overlapSeconds: 30,
+    removeFiller: false, customVocab: '', nightMode: false,
+    enableDolby: true, enableSummary: true, summaryMode: 'lecture',
+  }
 }
 
-function makeId() {
-  return `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-}
+const MARQUEE_ITEMS = ['Dolby音質強化', 'ノイズ除去', 'Whisper文字起こし', 'AI要約生成', 'SRT字幕出力', 'Groq対応', '夜間バッチモード', 'WakeLock対応', 'チェックポイント保存', '複数ファイルキュー']
 
 export default function Home() {
-  const { theme, changeTheme } = useTheme();
+  const [queue, setQueue] = useState<QueueItem[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [steps, setSteps] = useState<Step[]>([])
+  const [stepPct, setStepPct] = useState(0)
+  const [settings] = useState<Settings>(loadSettings)
+  const [editTranscript, setEditTranscript] = useState<TranscriptSegment[]>([])
+  const abortRef = useRef<AbortController | null>(null)
+  const { toasts, addToast, removeToast } = useToast()
+  const { acquire: acquireWakeLock, release: releaseWakeLock } = useWakeLock()
 
-  const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [outputFormat, setOutputFormat] = useState<OutputFormat>("mp3");
-  const [withTranscript, setWithTranscript] = useState(true);
-  const [withTimestamps, setWithTimestamps] = useState(true);
-  const [isRunning, setIsRunning] = useState(false);
-  // FIX #5: キャンセル中のUX表示用フラグ
-  const [isCancelling, setIsCancelling] = useState(false);
+  const updateStep = useCallback((id: string, status: StepStatus, desc?: string, timeMs?: number) => {
+    setSteps(prev => prev.map(s => s.id === id ? { ...s, status, ...(desc ? { desc } : {}), ...(timeMs !== undefined ? { timeMs } : {}) } : s))
+  }, [])
 
-  const abortRef = useRef<AbortController | null>(null);
+  const makeSteps = useCallback((enableDolby: boolean, enableSummary: boolean): Step[] => [
+    { id: 'upload', name: 'ファイル読み込み', status: 'pending' },
+    ...(enableDolby ? [{ id: 'dolby', name: 'Dolby 音質強化', status: 'pending' as StepStatus }] : []),
+    { id: 'whisper', name: 'Whisper 文字起こし', status: 'pending' },
+    ...(enableSummary ? [{ id: 'summary', name: 'AI 要約生成', status: 'pending' as StepStatus }] : []),
+    { id: 'save', name: '結果を保存', status: 'pending' },
+  ], [])
 
-  function updateItem(id: string, patch: Partial<QueueItem>) {
-    setQueue((prev) => prev.map((q) => q.id === id ? { ...q, ...patch } : q));
-  }
+  const processFile = useCallback(async (item: QueueItem) => {
+    const s = loadSettings()
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
 
-  function updateStep(id: string, stepIndex: number, partial: Partial<Step>) {
-    setQueue((prev) => prev.map((q) => {
-      if (q.id !== id) return q;
-      const steps = q.steps.map((s, i) => i === stepIndex ? { ...s, ...partial } : s);
-      return { ...q, steps };
-    }));
-  }
+    const initialSteps = makeSteps(s.enableDolby, s.enableSummary)
+    setSteps(initialSteps)
+    setActiveId(item.id)
+    setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'processing' } : q))
 
-  const addFiles = useCallback((files: File[]) => {
-    const newItems: QueueItem[] = files.map((file) => ({
-      id: makeId(),
-      file,
-      status: "queued",
-      steps: INITIAL_STEPS,
-      expanded: false,
-    }));
-    setQueue((prev) => [...prev, ...newItems]);
-  }, []);
+    await acquireWakeLock()
+    const startTime = Date.now()
 
-  function removeItem(id: string) {
-    setQueue((prev) => prev.filter((q) => q.id !== id));
-  }
+    try {
+      // Validate settings
+      if (s.enableDolby && (!s.dolbyKey || !s.dolbySecret)) throw new Error('Dolby APIキーが設定されていません')
+      if (!s.whisperKey) throw new Error(`${s.whisperEngine === 'groq' ? 'Groq' : 'OpenAI'} APIキーが設定されていません`)
+      if (s.enableSummary && !s.openaiKey) throw new Error('OpenAI APIキーが設定されていません（AI要約に必要）')
 
-  function toggleExpand(id: string) {
-    setQueue((prev) => prev.map((q) => q.id === id ? { ...q, expanded: !q.expanded } : q));
-  }
+      // Step: upload
+      updateStep('upload', 'active', 'ファイル読み込み中...')
+      const t0 = Date.now()
+      const mime = item.file.type || 'audio/mpeg'
+      let audioBlob: Blob = item.file
+      updateStep('upload', 'done', `${formatBytes(item.file.size)}`, Date.now() - t0)
 
-  function clearDone() {
-    setQueue((prev) => prev.filter((q) => q.status === "queued" || q.status === "processing"));
-  }
+      // Step: dolby
+      let enhancedUrl: string | null = null
+      let enhancedMime = mime
+      if (s.enableDolby) {
+        updateStep('dolby', 'active', '音質強化中...')
+        const td = Date.now()
+        try {
+          const enhanced = await enhanceAudio(
+            audioBlob, mime, item.file.name,
+            { appKey: s.dolbyKey, appSecret: s.dolbySecret, noiseReduction: s.noiseReduction },
+            pct => { updateStep('dolby', 'active', `音質強化中... ${pct}%`); setStepPct(pct) },
+            ctrl.signal
+          )
+          audioBlob = enhanced
+          enhancedMime = enhanced.type || mime
+          enhancedUrl = URL.createObjectURL(enhanced)
+          updateStep('dolby', 'done', '音質強化完了', Date.now() - td)
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (msg.includes('Aborted')) throw e
+          // Dolby失敗はスキップして続行
+          updateStep('dolby', 'error', `スキップ: ${msg.slice(0,60)}`)
+          addToast('Dolby処理をスキップしました', 'info')
+        }
+      }
 
-  async function processItem(item: QueueItem, signal: AbortSignal) {
-    const keys = getApiKeys();
-
-    updateItem(item.id, {
-      status: "processing",
-      expanded: true,
-      steps: [
-        { label: "変換中", progress: 0, status: "running" },
-        { label: "音質強化中", progress: 0, status: "waiting" },
-        { label: withTranscript ? "文字起こし中" : "文字起こし（スキップ）", progress: withTranscript ? 0 : 100, status: withTranscript ? "waiting" : "done" },
-      ],
-    });
-
-    // STEP 1: Convert
-    updateStep(item.id, 0, { status: "running", progress: 0, detail: "ffmpeg.wasm を初期化中..." });
-
-    const convertedBlob = await convertAudio({
-      file: item.file,
-      outputFormat,
-      onProgress: (p) => updateStep(item.id, 0, { progress: p, detail: `変換中... ${p}%` }),
-      signal,
-    });
-
-    const needsSplit = convertedBlob.size > WHISPER_LIMIT_BYTES;
-    let chunks: Blob[] = [convertedBlob];
-
-    if (needsSplit) {
-      updateStep(item.id, 0, { progress: 90, detail: "分割処理中..." });
-      chunks = await splitAudio(convertedBlob, outputFormat, CHUNK_MINUTES, undefined, signal);
-      updateStep(item.id, 0, { progress: 100, detail: `${chunks.length}チャンクに分割完了` });
-    }
-
-    updateStep(item.id, 0, { status: "done", progress: 100, detail: needsSplit ? `${chunks.length}チャンクに分割` : "変換完了" });
-
-    // STEP 2: Enhance — FIX #4: appKey + appSecret を渡す
-    updateStep(item.id, 1, { status: "running", progress: 0, detail: "Dolby.io API へ送信中..." });
-
-    const enhancedChunks: Blob[] = [];
-    for (let i = 0; i < chunks.length; i++) {
-      if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
-      const label = chunks.length > 1 ? `チャンク ${i + 1}/${chunks.length} を処理中...` : "処理中...";
-      updateStep(item.id, 1, { detail: label });
-      const enhanced = await enhanceAudio(
-        chunks[i],
-        keys.dolbyAppKey,
-        keys.dolbyAppSecret,
-        (p) => {
-          const overall = Math.round(((i + p / 100) / chunks.length) * 100);
-          updateStep(item.id, 1, { progress: overall, detail: label });
+      // Step: whisper
+      updateStep('whisper', 'active', '文字起こし準備中...')
+      const tw = Date.now()
+      const transcript = await transcribeAudio(
+        audioBlob, enhancedMime,
+        {
+          engine: s.whisperEngine, apiKey: s.whisperKey, language: s.language,
+          removeFiller: s.removeFiller, customVocab: s.customVocab,
+          chunkMinutes: s.chunkMinutes, overlapSeconds: s.overlapSeconds,
+          nightMode: s.nightMode,
         },
-        signal
-      );
-      enhancedChunks.push(enhanced);
-    }
+        (pct, msg) => { updateStep('whisper', 'active', msg); setStepPct(pct) },
+        ctrl.signal
+      )
+      setEditTranscript(transcript)
+      updateStep('whisper', 'done', `${transcript.length} セグメント`, Date.now() - tw)
 
-    const finalEnhanced = await mergeAudio(enhancedChunks, outputFormat);
-    updateStep(item.id, 1, { status: "done", progress: 100, detail: "音質強化完了" });
-
-    // STEP 3: Transcribe
-    let finalTranscript: string | null = null;
-
-    if (withTranscript) {
-      updateStep(item.id, 2, { status: "running", progress: 0, detail: "Whisper API へ送信中..." });
-
-      const allSegments: TranscriptSegment[] = [];
-      let allText = "";
-      let offsetSeconds = 0;
-      const chunkDurationSec = CHUNK_MINUTES * 60;
-
-      for (let i = 0; i < enhancedChunks.length; i++) {
-        if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
-        const label = enhancedChunks.length > 1 ? `チャンク ${i + 1}/${enhancedChunks.length} を文字起こし中...` : "文字起こし中...";
-        updateStep(item.id, 2, { detail: label, progress: Math.round((i / enhancedChunks.length) * 100) });
-
-        const result = await transcribeAudio(
-          enhancedChunks[i],
-          keys.openai,
-          withTimestamps,
-          `chunk_${i}.${outputFormat}`,
-          signal
-        );
-
-        if (withTimestamps && result.segments) {
-          allSegments.push(
-            ...result.segments.map((s) => ({ ...s, start: s.start + offsetSeconds, end: s.end + offsetSeconds }))
-          );
-        } else {
-          allText += (i > 0 ? "\n" : "") + result.text;
+      // Step: summary
+      let summary: SummaryResult | null = null
+      if (s.enableSummary) {
+        updateStep('summary', 'active', 'AI要約生成中...')
+        const ts = Date.now()
+        try {
+          summary = await generateSummary(transcript, s.openaiKey, s.summaryMode, ctrl.signal)
+          updateStep('summary', 'done', '要約完了', Date.now() - ts)
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e)
+          updateStep('summary', 'error', `スキップ: ${msg.slice(0,60)}`)
+          addToast('AI要約をスキップしました', 'info')
         }
-        offsetSeconds += chunkDurationSec;
       }
 
-      finalTranscript = withTimestamps && allSegments.length > 0
-        ? segmentsToText(allSegments, true)
-        : allText;
+      // Step: save
+      updateStep('save', 'active', '保存中...')
+      const enhancedB64 = enhancedUrl ? await fileToBase64(audioBlob) : null
+      const totalTime = Date.now() - startTime
 
-      updateStep(item.id, 2, { status: "done", progress: 100, detail: "文字起こし完了" });
+      await saveHistory({
+        id: item.id,
+        filename: item.file.name,
+        duration: transcript.length > 0 ? transcript[transcript.length - 1].end : 0,
+        fileSize: item.file.size,
+        processedAt: Date.now(),
+        engine: s.whisperEngine,
+        language: s.language,
+        mode: s.summaryMode,
+        transcript,
+        summary: summary ? JSON.stringify(summary) : '',
+        enhancedAudioB64: enhancedB64,
+        enhancedMime,
+        processingTime: totalTime,
+        checksum: item.id,
+      })
+      updateStep('save', 'done', `処理時間 ${(totalTime/1000).toFixed(0)}s`)
+
+      const result: ProcessResult = { enhancedUrl, enhancedMime, transcript, summary, processingTime: totalTime }
+      setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'done', result } : q))
+      addToast(`完了: ${item.file.name}`, 'success')
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg.includes('Aborted')) {
+        addToast('処理をキャンセルしました', 'info')
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'pending' } : q))
+        setSteps(prev => prev.map(s => s.status === 'active' ? { ...s, status: 'error' as StepStatus } : s))
+      } else {
+        addToast(`エラー: ${msg.slice(0,80)}`, 'error')
+        setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'error', error: msg } : q))
+        setSteps(prev => prev.map(s => s.status === 'active' ? { ...s, status: 'error' as StepStatus, desc: msg.slice(0,80) } : s))
+      }
+    } finally {
+      releaseWakeLock()
+      setActiveId(null)
+      abortRef.current = null
     }
+  }, [updateStep, makeSteps, acquireWakeLock, releaseWakeLock, addToast])
 
-    await saveHistory({
-      id: `${item.id}_saved`,
-      fileName: item.file.name,
-      processedAt: Date.now(),
-      fileSize: item.file.size,
-      enhancedBlob: finalEnhanced,
-      transcript: finalTranscript,
-      outputFormat,
-      status: "success",
-    }).catch(() => {});
+  const handleFiles = useCallback((files: File[]) => {
+    const newItems: QueueItem[] = files.map(f => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      file: f, status: 'pending',
+    }))
+    setQueue(prev => [...prev, ...newItems])
+  }, [])
 
-    updateItem(item.id, {
-      status: "done",
-      enhancedBlob: finalEnhanced,
-      transcript: finalTranscript,
-    });
-  }
-
-  async function handleStart() {
-    const keys = getApiKeys();
-    if (!keys.dolbyAppKey || !keys.dolbyAppSecret) {
-      showToast("Dolby.io の App Key と App Secret を設定してください", "error");
-      return;
-    }
-    if (withTranscript && !keys.openai) {
-      showToast("OpenAI APIキーが設定されていません", "error");
-      return;
-    }
-
-    const pending = queue.filter((q) => q.status === "queued");
-    if (pending.length === 0) return;
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setIsRunning(true);
-    setIsCancelling(false);
-
+  const startProcessing = useCallback(async () => {
+    const pending = queue.filter(q => q.status === 'pending')
     for (const item of pending) {
-      if (controller.signal.aborted) break;
-      try {
-        await processItem(item, controller.signal);
-        showToast(`✓ ${item.file.name} 完了`, "success");
-      } catch (err) {
-        if (controller.signal.aborted) {
-          setQueue((prev) => prev.map((q) =>
-            q.status === "queued" || q.status === "processing"
-              ? { ...q, status: "cancelled", steps: q.steps.map((s) => s.status === "running" ? { ...s, status: "error" } : s) }
-              : q
-          ));
-          showToast("キャンセルしました", "info");
-          break;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        updateItem(item.id, {
-          status: "error",
-          error: msg,
-          steps: item.steps.map((s) => s.status === "running" ? { ...s, status: "error" } : s),
-        });
-        showToast(`✕ ${item.file.name} エラー`, "error");
-      }
+      await processFile(item)
     }
+  }, [queue, processFile])
 
-    setIsRunning(false);
-    setIsCancelling(false);
-    abortRef.current = null;
-  }
+  const cancel = () => { abortRef.current?.abort() }
+  const removeFromQueue = (id: string) => setQueue(prev => prev.filter(q => q.id !== id))
+  const clearDone = () => setQueue(prev => prev.filter(q => q.status !== 'done'))
 
-  // FIX #5: キャンセル時に isCancelling フラグを立てて「キャンセル中...」表示
-  function handleCancel() {
-    setIsCancelling(true);
-    abortRef.current?.abort();
-  }
+  const activeItem = queue.find(q => q.id === activeId)
+  const doneItems = queue.filter(q => q.status === 'done')
+  const pendingCount = queue.filter(q => q.status === 'pending').length
+  const isProcessing = activeId !== null
 
-  const queuedCount = queue.filter((q) => q.status === "queued").length;
-  const doneCount = queue.filter((q) => q.status === "done" || q.status === "error" || q.status === "cancelled").length;
+  const s = settings // for display
 
   return (
-    <div style={{ minHeight: "100vh", background: "var(--bg-primary)", paddingBottom: "5rem" }}>
-      <ToastContainer />
-
-      <header style={{
-        background: "var(--bg-card)",
-        borderBottom: "1px solid var(--border)",
-        padding: "0.875rem 1.25rem",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        position: "sticky",
-        top: 0,
-        zIndex: 50,
-      }}>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.625rem" }}>
-          <Music2 size={22} color="var(--accent-primary)" />
-          <span style={{ fontWeight: 700, fontSize: "1rem" }}>
-            <span className="label-upper">AudioClear</span>
-          </span>
+    <>
+      {/* NAV */}
+      <nav>
+        <a href="/" style={{ textDecoration:'none' }}>
+          <div className="nav-logo-main">AudioClear</div>
+          <div className="nav-logo-sub">Audio Enhancement · Transcription · AI Summary</div>
+        </a>
+        <ul className="nav-links">
+          <li><a href="/history">履歴</a></li>
+          <li><a href="/settings">設定</a></li>
+        </ul>
+        <div style={{ display:'flex', gap:8 }}>
+          <a href="/settings" className="nav-ghost">設定</a>
+          <a href="/history" className="nav-cta">履歴を見る →</a>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-          <ThemeSwitcher theme={theme} onChange={changeTheme} />
-          <Link href="/history" style={{ color: "var(--text-secondary)" }}>
-            <History size={20} />
-          </Link>
-          <Link href="/settings" style={{ color: "var(--text-secondary)" }}>
-            <Settings size={20} />
-          </Link>
-        </div>
-      </header>
+      </nav>
 
-      <main style={{ maxWidth: 720, margin: "0 auto", padding: "1.5rem 1rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
-
-        <div className="card">
-          <DropZone onFiles={addFiles} disabled={isRunning} multiple />
-        </div>
-
-        <div className="card">
-          <p style={{ fontWeight: 600, marginBottom: "1rem", fontSize: "0.9rem" }} className="label-upper">
-            オプション
-          </p>
-
-          <div style={{ marginBottom: "1rem" }}>
-            <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)", marginBottom: "0.5rem", fontWeight: 500 }}>出力形式</p>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              {(["mp3", "wav"] as OutputFormat[]).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => !isRunning && setOutputFormat(f)}
-                  style={{
-                    flex: 1,
-                    padding: "0.5rem",
-                    borderRadius: "var(--radius-btn)",
-                    border: outputFormat === f ? "2px solid var(--accent-primary)" : "1px solid var(--border)",
-                    background: outputFormat === f ? "var(--accent-primary)" : "transparent",
-                    color: outputFormat === f ? "var(--button-text)" : "var(--text-primary)",
-                    fontWeight: 600,
-                    fontSize: "0.85rem",
-                    cursor: isRunning ? "not-allowed" : "pointer",
-                    transition: "all 0.15s ease",
-                    fontFamily: "var(--font)",
-                  }}
-                >
-                  .{f}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
-            <div>
-              <p style={{ fontSize: "0.85rem", fontWeight: 500 }}>文字起こし</p>
-              <p style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>OpenAI Whisper APIを使用</p>
-            </div>
-            <label className="toggle">
-              <input type="checkbox" checked={withTranscript}
-                onChange={(e) => !isRunning && setWithTranscript(e.target.checked)} disabled={isRunning} />
-              <span className="toggle-slider" />
-            </label>
-          </div>
-
-          {withTranscript && (
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <p style={{ fontSize: "0.85rem", fontWeight: 500 }}>タイムスタンプ付き</p>
-                <p style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>[0:00] 形式で出力</p>
-              </div>
-              <label className="toggle">
-                <input type="checkbox" checked={withTimestamps}
-                  onChange={(e) => !isRunning && setWithTimestamps(e.target.checked)} disabled={isRunning} />
-                <span className="toggle-slider" />
-              </label>
-            </div>
-          )}
-        </div>
-
-        {queue.length > 0 && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.625rem" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
-                {queue.length}件（待機 {queuedCount}）
-              </p>
-              {doneCount > 0 && !isRunning && (
-                <button
-                  className="btn-secondary"
-                  style={{ fontSize: "0.75rem", padding: "0.25rem 0.625rem" }}
-                  onClick={clearDone}
-                >
-                  完了済みをクリア
-                </button>
-              )}
-            </div>
-
-            {queue.map((item) => (
-              <QueueCard
-                key={item.id}
-                item={item}
-                onRemove={removeItem}
-                onToggle={toggleExpand}
-                outputFormat={outputFormat}
-              />
+      {/* MARQUEE */}
+      <div style={{ marginTop:58 }}>
+        <div className="mq">
+          <div className="mq-track">
+            {[...MARQUEE_ITEMS, ...MARQUEE_ITEMS].map((item, i) => (
+              <div key={i} className="mq-item"><span className="mq-dot">●</span>{item}</div>
             ))}
           </div>
-        )}
-
-        <div style={{ display: "flex", gap: "0.75rem" }}>
-          {isRunning ? (
-            <button
-              className="btn-primary"
-              style={{
-                flex: 1, justifyContent: "center", padding: "0.875rem", fontSize: "1rem",
-                background: isCancelling ? "#888" : "#ef4444",
-                cursor: isCancelling ? "not-allowed" : "pointer",
-              }}
-              onClick={handleCancel}
-              disabled={isCancelling}
-            >
-              <X size={16} />
-              {/* FIX #5: キャンセル中は「キャンセル中...」と表示 */}
-              {isCancelling ? "キャンセル中..." : "キャンセル"}
-            </button>
-          ) : (
-            <button
-              className="btn-primary"
-              style={{ flex: 1, justifyContent: "center", padding: "0.875rem", fontSize: "1rem" }}
-              onClick={handleStart}
-              disabled={queuedCount === 0}
-            >
-              <Sparkles size={16} />
-              {queuedCount > 0 ? `処理開始（${queuedCount}件）` : "ファイルを追加してください"}
-            </button>
-          )}
         </div>
-      </main>
-
-      <nav className="bottom-nav">
-        <Link href="/" className="active">
-          <Music2 size={20} />
-          <span>メイン</span>
-        </Link>
-        <Link href="/history">
-          <History size={20} />
-          <span>履歴</span>
-        </Link>
-        <Link href="/settings">
-          <Settings size={20} />
-          <span>設定</span>
-        </Link>
-      </nav>
-    </div>
-  );
-}
-
-function QueueCard({
-  item,
-  onRemove,
-  onToggle,
-  outputFormat,
-}: {
-  item: QueueItem;
-  onRemove: (id: string) => void;
-  onToggle: (id: string) => void;
-  outputFormat: OutputFormat;
-}) {
-  const statusColor: Record<ItemStatus, string> = {
-    queued: "var(--text-secondary)",
-    processing: "var(--accent-primary)",
-    done: "#22c55e",
-    error: "#ef4444",
-    cancelled: "var(--text-secondary)",
-  };
-  const statusLabel: Record<ItemStatus, string> = {
-    queued: "待機中",
-    processing: "処理中",
-    done: "完了",
-    error: "エラー",
-    cancelled: "キャンセル",
-  };
-
-  return (
-    <div className="card" style={{ padding: "0.875rem 1rem" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: "0.625rem" }}>
-        <Music2 size={15} color="var(--accent-primary)" style={{ flexShrink: 0 }} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <p style={{ fontSize: "0.85rem", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {item.file.name}
-          </p>
-          <p style={{ fontSize: "0.72rem", color: statusColor[item.status], fontWeight: 500 }}>
-            {statusLabel[item.status]}
-            {item.status === "error" && item.error && ` — ${item.error.slice(0, 60)}`}
-          </p>
-        </div>
-
-        {(item.status === "processing" || item.status === "done" || item.status === "error") && (
-          <button className="btn-icon" onClick={() => onToggle(item.id)} style={{ padding: "0.25rem" }}>
-            {item.expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          </button>
-        )}
-
-        {item.status !== "processing" && (
-          <button className="btn-icon" onClick={() => onRemove(item.id)} style={{ padding: "0.25rem" }}>
-            <X size={14} />
-          </button>
-        )}
       </div>
 
-      {item.expanded && (item.status === "processing" || item.status === "error") && (
-        <div style={{ marginTop: "0.875rem" }}>
-          <ProgressSteps steps={item.steps} />
-        </div>
-      )}
+      {/* HERO */}
+      <section style={{ padding:'72px 40px 40px', maxWidth:900, margin:'0 auto' }}>
+        <div className="s-tag animate-up animate-up-1">長時間録音 × AIパイプライン</div>
+        <h1 className="s-h2 animate-up animate-up-2" style={{ fontSize:'clamp(36px,5vw,60px)', marginBottom:12 }}>
+          録音を入れるだけ。<br /><span style={{ color:'var(--t2)', fontStyle:'italic' }}>あとは全部AIが動く。</span>
+        </h1>
+        <p className="s-sub animate-up animate-up-3">
+          Dolby音質強化 → Whisper文字起こし → GPT要約まで全自動。<br />
+          90分の授業録音が<strong style={{ color:'var(--tx)' }}>15〜25分</strong>で処理完了。
+        </p>
 
-      {item.expanded && item.status === "done" && (item.enhancedBlob || item.transcript) && (
-        <div style={{ marginTop: "0.875rem", borderTop: "1px solid var(--border)", paddingTop: "0.875rem" }}>
-          <ResultPanel
-            enhancedBlob={item.enhancedBlob ?? null}
-            transcript={item.transcript ?? null}
-            outputFormat={outputFormat}
-            fileName={item.file.name}
-          />
+        {/* Mode banner */}
+        <div style={{ display:'flex', gap:12, marginTop:28, flexWrap:'wrap' }} className="animate-up animate-up-4">
+          {(['lecture','meeting','care','general'] as SummaryMode[]).map(m => {
+            const labels: Record<SummaryMode,string> = { lecture:'授業・講義', meeting:'会議・ミーティング', care:'介護記録', general:'汎用' }
+            return (
+              <div key={m} style={{ fontFamily:'DM Mono,monospace', fontSize:9, letterSpacing:2, color: s.summaryMode===m?'var(--cy)':'var(--t3)', border:`1px solid ${s.summaryMode===m?'rgba(91,200,232,.4)':'var(--bd)'}`, padding:'5px 12px', textTransform:'uppercase' }}>
+                {labels[m]}
+              </div>
+            )
+          })}
+          <a href="/settings" style={{ fontFamily:'DM Mono,monospace', fontSize:9, letterSpacing:2, color:'var(--am)', border:'1px solid rgba(240,180,41,.3)', padding:'5px 12px', textTransform:'uppercase', textDecoration:'none' }}>
+            設定で変更 →
+          </a>
         </div>
-      )}
-    </div>
-  );
+      </section>
+
+      {/* MAIN */}
+      <main style={{ maxWidth:900, margin:'0 auto', padding:'0 40px 80px' }}>
+
+        {/* Drop zone */}
+        <DropZone onFiles={handleFiles} disabled={isProcessing} />
+
+        {/* Queue */}
+        {queue.length > 0 && (
+          <div className="card" style={{ marginTop:16 }}>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:16 }}>
+              <div className="s-tag" style={{ margin:0 }}>キュー ({queue.length})</div>
+              <div style={{ display:'flex', gap:8 }}>
+                {doneItems.length > 0 && <button className="btn-ghost" style={{ fontSize:9, padding:'5px 12px' }} onClick={clearDone}>完了を消す</button>}
+              </div>
+            </div>
+            {queue.map(item => (
+              <div key={item.id} className="queue-item">
+                <div className="queue-name">{item.file.name}</div>
+                <div className="queue-size">{formatBytes(item.file.size)}</div>
+                <div className={`queue-status ${item.status}`}>
+                  {item.status === 'pending' ? '待機中'
+                    : item.status === 'processing' ? '処理中'
+                    : item.status === 'done' ? '完了'
+                    : 'エラー'}
+                </div>
+                {item.status !== 'processing' && (
+                  <button onClick={() => removeFromQueue(item.id)} style={{ background:'none', border:'none', color:'var(--t3)', cursor:'pointer', fontSize:14, marginLeft:4 }}>×</button>
+                )}
+              </div>
+            ))}
+
+            <div style={{ display:'flex', gap:10, marginTop:20 }}>
+              {!isProcessing && pendingCount > 0 && (
+                <button className="btn-primary" onClick={startProcessing}>
+                  ▶ 処理開始 ({pendingCount}件)
+                </button>
+              )}
+              {isProcessing && (
+                <button className="btn-danger" onClick={cancel}>■ キャンセル</button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Processing progress */}
+        {isProcessing && steps.length > 0 && (
+          <div className="card" style={{ marginTop:16 }}>
+            <div className="s-tag" style={{ marginBottom:16 }}>処理中: {activeItem?.file.name}</div>
+
+            {/* Progress bar */}
+            <div style={{ height:2, background:'var(--bd2)', marginBottom:24, position:'relative', overflow:'hidden' }}>
+              <div style={{ position:'absolute', left:0, top:0, height:'100%', background:'var(--cy)', width:`${stepPct}%`, transition:'width .5s' }} />
+            </div>
+
+            <ProgressSteps steps={steps} />
+
+            <div style={{ marginTop:16, fontFamily:'DM Mono,monospace', fontSize:9, letterSpacing:1.5, color:'var(--t3)', textTransform:'uppercase' }}>
+              ⚠ 処理中は画面を閉じないでください（WakeLock有効）
+            </div>
+          </div>
+        )}
+
+        {/* Results */}
+        {doneItems.map(item => {
+          if (!item.result) return null
+          const r = item.result
+          const originalUrl = URL.createObjectURL(item.file)
+          return (
+            <div key={item.id} className="card" style={{ marginTop:24 }}>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:20, flexWrap:'wrap', gap:8 }}>
+                <div>
+                  <div className="s-tag" style={{ margin:0, marginBottom:4 }}>結果</div>
+                  <div style={{ fontFamily:'DM Mono,monospace', fontSize:11, color:'var(--tx)' }}>{item.file.name}</div>
+                  <div style={{ fontFamily:'DM Mono,monospace', fontSize:9, color:'var(--t3)', marginTop:2 }}>
+                    処理時間 {(r.processingTime/1000).toFixed(0)}s · {r.transcript.length} セグメント
+                    {r.transcript.length > 0 && ` · ${formatDuration(r.transcript[r.transcript.length-1].end)}`}
+                  </div>
+                </div>
+              </div>
+
+              {/* Audio players */}
+              <div style={{ display:'flex', flexDirection:'column', gap:12, marginBottom:24 }}>
+                <AudioPlayer src={originalUrl} label="元の音声" />
+                {r.enhancedUrl && <AudioPlayer src={r.enhancedUrl} label="音質強化後" />}
+              </div>
+
+              <hr className="divider" style={{ marginBottom:24 }} />
+
+              {/* Transcript */}
+              {r.transcript.length > 0 && (
+                <div style={{ marginBottom:24 }}>
+                  <div className="s-tag" style={{ marginBottom:12 }}>文字起こし</div>
+                  <TranscriptViewer
+                    segments={editTranscript.length ? editTranscript : r.transcript}
+                    editable
+                    onEdit={segs => setEditTranscript(segs)}
+                  />
+                </div>
+              )}
+
+              {/* Summary */}
+              {r.summary && (
+                <>
+                  <hr className="divider" style={{ marginBottom:24 }} />
+                  <SummaryPanel summary={r.summary} mode={s.summaryMode} />
+                </>
+              )}
+            </div>
+          )
+        })}
+
+        {/* Empty state */}
+        {queue.length === 0 && (
+          <div style={{ marginTop:40, textAlign:'center' }}>
+            <div style={{ fontFamily:'DM Mono,monospace', fontSize:9, letterSpacing:3, color:'var(--t3)', textTransform:'uppercase', marginBottom:16 }}>はじめ方</div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))', gap:12, maxWidth:700, margin:'0 auto' }}>
+              {[
+                { n:'01', t:'設定', d:'設定画面でAPIキーを入力' },
+                { n:'02', t:'アップロード', d:'音声・動画ファイルをドロップ' },
+                { n:'03', t:'自動処理', d:'Dolby → Whisper → AI要約' },
+                { n:'04', t:'ダウンロード', d:'テキスト・字幕・要約を取得' },
+              ].map(item => (
+                <div key={item.n} className="card-sm" style={{ textAlign:'left' }}>
+                  <div style={{ fontFamily:'Cormorant Garamond,serif', fontSize:28, fontWeight:300, color:'var(--t3)', marginBottom:8 }}>{item.n}</div>
+                  <div style={{ fontFamily:'DM Mono,monospace', fontSize:10, letterSpacing:1.5, color:'var(--tx)', textTransform:'uppercase', marginBottom:4 }}>{item.t}</div>
+                  <div style={{ fontSize:12, color:'var(--t2)' }}>{item.d}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop:24 }}>
+              <a href="/settings" className="btn-primary" style={{ display:'inline-flex' }}>設定を開く →</a>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
+
+      {/* Footer */}
+      <footer style={{ borderTop:'1px solid var(--bd)', padding:'32px 40px', maxWidth:900, margin:'0 auto' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:12 }}>
+          <div style={{ fontFamily:'Cormorant Garamond,serif', fontSize:18, fontWeight:300, letterSpacing:5, textTransform:'uppercase', color:'var(--t2)' }}>AudioClear</div>
+          <div style={{ display:'flex', gap:20 }}>
+            <a href="/history" style={{ fontFamily:'DM Mono,monospace', fontSize:10, color:'var(--t3)', textDecoration:'none', letterSpacing:1.5 }}>履歴</a>
+            <a href="/settings" style={{ fontFamily:'DM Mono,monospace', fontSize:10, color:'var(--t3)', textDecoration:'none', letterSpacing:1.5 }}>設定</a>
+          </div>
+        </div>
+        <div style={{ marginTop:16, fontFamily:'DM Mono,monospace', fontSize:9, color:'var(--t3)', letterSpacing:1 }}>
+          APIキー持ち込み式 · 運用コストゼロ · データはブラウザ内のみ保存
+        </div>
+      </footer>
+    </>
+  )
 }

@@ -1,42 +1,26 @@
-"use client";
+'use client'
+import { useState, useCallback } from 'react'
 
-import { useCallback } from "react";
-import { createPortal } from "react-dom";
-import { createElement, useState, useEffect, useRef } from "react";
+export type ToastType = 'success' | 'error' | 'info'
 
-export type ToastType = "success" | "error" | "info";
-
-interface Toast {
-  id: string;
-  message: string;
-  type: ToastType;
+export interface Toast {
+  id: string
+  type: ToastType
+  message: string
 }
 
-// グローバルな状態（シンプルなイベントバス方式）
-const listeners = new Set<(toasts: Toast[]) => void>();
-let toasts: Toast[] = [];
+export function useToast() {
+  const [toasts, setToasts] = useState<Toast[]>([])
 
-function notify() {
-  listeners.forEach((fn) => fn([...toasts]));
-}
+  const addToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = Math.random().toString(36).slice(2)
+    setToasts(prev => [...prev, { id, type, message }])
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000)
+  }, [])
 
-export function showToast(message: string, type: ToastType = "info", durationMs = 3000) {
-  const id = `${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;
-  toasts = [...toasts, { id, message, type }];
-  notify();
-  setTimeout(() => {
-    toasts = toasts.filter((t) => t.id !== id);
-    notify();
-  }, durationMs);
-}
+  const removeToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
 
-export function useToastContainer() {
-  const [items, setItems] = useState<Toast[]>([]);
-
-  useEffect(() => {
-    listeners.add(setItems);
-    return () => { listeners.delete(setItems); };
-  }, []);
-
-  return items;
+  return { toasts, addToast, removeToast }
 }

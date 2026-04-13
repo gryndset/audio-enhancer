@@ -1,53 +1,30 @@
-"use client";
+'use client'
+import { Toast } from '@/hooks/useToast'
 
-import { useEffect, useState } from "react";
-import { createPortal } from "react-dom";
-import { useToastContainer } from "@/hooks/useToast";
-import { CheckCircle, XCircle, Info } from "lucide-react";
+interface Props {
+  toasts: Toast[]
+  onRemove: (id: string) => void
+}
 
-const icons = {
-  success: <CheckCircle size={16} color="#22c55e" />,
-  error: <XCircle size={16} color="#ef4444" />,
-  info: <Info size={16} color="var(--accent-primary)" />,
-};
+const icons: Record<string, string> = {
+  success: '✓',
+  error: '✕',
+  info: '·',
+}
 
-export default function ToastContainer() {
-  const toasts = useToastContainer();
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => { setMounted(true); }, []);
-  if (!mounted) return null;
-
-  const root = document.getElementById("toast-root");
-  if (!root) return null;
-
-  return createPortal(
-    <>
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.625rem",
-            background: "var(--bg-card)",
-            border: "1px solid var(--border)",
-            borderRadius: "var(--radius-card)",
-            boxShadow: "var(--shadow-card)",
-            padding: "0.75rem 1rem",
-            fontSize: "0.875rem",
-            pointerEvents: "auto",
-            animation: "slideIn 0.2s ease",
-            maxWidth: 320,
-            color: "var(--text-primary)",
-          }}
-        >
-          {icons[t.type]}
-          <span>{t.message}</span>
+export default function ToastContainer({ toasts, onRemove }: Props) {
+  if (!toasts.length) return null
+  return (
+    <div className="toast-container">
+      {toasts.map(t => (
+        <div key={t.id} className={`toast toast-${t.type}`}>
+          <span style={{ fontFamily:'DM Mono,monospace', fontSize:13, color: t.type==='success'?'var(--gn)':t.type==='error'?'var(--rd)':'var(--cy)' }}>
+            {icons[t.type]}
+          </span>
+          <span className="toast-msg">{t.message}</span>
+          <button className="toast-close" onClick={() => onRemove(t.id)}>×</button>
         </div>
       ))}
-      <style>{`@keyframes slideIn { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }`}</style>
-    </>,
-    root
-  );
+    </div>
+  )
 }

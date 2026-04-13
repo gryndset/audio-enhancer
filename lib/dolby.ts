@@ -1,142 +1,177 @@
-"use client";
+'use client'
 
-const DOLBY_BASE = "https://api.dolby.com";
-
-interface DolbyUploadResponse {
-  url: string;
+export interface DolbySettings {
+  appKey: string
+  appSecret: string
+  noiseReduction: 'low' | 'medium' | 'high'
 }
 
-interface DolbyEnhanceResponse {
-  job_id: string;
+interface DolbyTokenResponse {
+  access_token: string
 }
 
-interface DolbyJobStatus {
-  status: "Pending" | "Running" | "Success" | "Failed";
-  progress: number;
+async function getToken(appKey: string, appSecret: string): Promise<string> {
+  const creds = btoa(`${appKey}:${appSecret}`)
+  const res = await fetch('https://api.dolby.io/v1/auth/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${creds}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    },
+    body: 'grant_type=client_credentials&expires_in=1800',
+  })
+  if (!res.ok) throw new Error(`Dolby auth failed: ${res.status}`)
+  const data: DolbyTokenResponse = await res.json()
+  return data.access_token
 }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+async function getUploadUrl(token: string, filename: string): Promise<string> {
+  const dlbPath = `dlb://input/${Date.now()}_${filename}`
+  const res = await fetch('https://api.dolby.com/media/input', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: dlbPath }),
+  })
+  if (!res.ok) throw new Error(`Dolby input URL failed: ${res.status}`)
+  const data = await res.json()
+  return data.url
 }
 
-// FIX #4: Dolby.io の認証は App Key + App Secret の Basic 認証
-// 旧コード: btoa(apiKey + ":") → APIキー単体ではなく "AppKey:AppSecret" をBase64する
-function authHeader(appKey: string, appSecret: string) {
-  return `Basic ${btoa(`${appKey}:${appSecret}`)}`;
+async function uploadFile(uploadUrl: string, file: Blob, mime: string) {
+  const res = await fetch(uploadUrl, {
+    method: 'PUT',
+    headers: { 'Content-Type': mime },
+    body: file,
+  })
+  if (!res.ok) throw new Error(`Dolby upload failed: ${res.status}`)
 }
 
-// localStorage のキー名も変更（設定画面と合わせる）
-export function getDolbyKeys(): { appKey: string; appSecret: string } {
-  if (typeof window === "undefined") return { appKey: "", appSecret: "" };
-  return {
-    appKey: localStorage.getItem("dolby_app_key") ?? "",
-    appSecret: localStorage.getItem("dolby_app_secret") ?? "",
-  };
+async function startEnhance(
+  token: string,
+  inputUrl: string,
+  outputUrl: string,
+  noiseLevel: 'low' | 'medium' | 'high'
+): Promise<string> {
+  const amountMap = { low: 30, medium: 60, high: 90 }
+  const res = await fetch('https://api.dolby.com/media/enhance', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      input: inputUrl,
+      output: outputUrl,
+      content: { type: 'lecture' },
+      audio: {
+        noise: { reduction: { enable: true, amount: amountMap[noiseLevel] } },
+        speech: { isolation: { enable: true, amount: 70 } },
+      },
+    }),
+  })
+  if (!res.ok) throw new Error(`Dolby enhance start failed: ${res.status}`)
+  const data = await res.json()
+  return data.job_id
+}
+
+async function pollJob(
+  token: string,
+  jobId: string,
+  onProgress?: (pct: number) => void,
+  signal?: AbortSignal
+): Promise<void> {
+  const maxTries = 300 // 10 min
+  for (let i = 0; i < maxTries; i++) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    await new Promise(r => setTimeout(r, 2000))
+
+    const res = await fetch(`https://api.dolby.com/media/enhance?job_id=${jobId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal,
+    })
+    if (!res.ok) continue
+
+    const data = await res.json()
+    if (data.progress !== undefined && onProgress) {
+      onProgress(Math.max(5, data.progress))
+    }
+    if (data.status === 'Success') return
+    if (data.status === 'Failed' || data.status === 'Canceled') {
+      throw new Error(`Dolby job ${data.status.toLowerCase()}`)
+    }
+  }
+  throw new Error('Dolby job timed out')
+}
+
+async function downloadResult(token: string, outputDlbUrl: string): Promise<string> {
+  const res = await fetch('https://api.dolby.com/media/output', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) throw new Error('Failed to get output URL list')
+
+  // Get presigned download URL
+  const res2 = await fetch(`https://api.dolby.com/media/output?url=${encodeURIComponent(outputDlbUrl)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res2.ok) throw new Error(`Dolby output fetch failed: ${res2.status}`)
+  const data = await res2.json()
+  return data.url // presigned S3 URL
 }
 
 export async function enhanceAudio(
-  blob: Blob,
-  appKey: string,
-  appSecret: string,
-  onProgress?: (p: number) => void,
+  file: Blob,
+  mime: string,
+  filename: string,
+  settings: DolbySettings,
+  onProgress?: (pct: number) => void,
   signal?: AbortSignal
 ): Promise<Blob> {
-  const uid = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const inputPath = `dlb://input/audio_${uid}`;
-  const outputPath = `dlb://output/enhanced_${uid}`;
-  const auth = authHeader(appKey, appSecret);
+  onProgress?.(2)
+  const token = await getToken(settings.appKey, settings.appSecret)
 
-  // 1. Get upload URL
-  const uploadRes = await fetch(`${DOLBY_BASE}/media/input`, {
-    method: "POST",
-    headers: { Authorization: auth, "Content-Type": "application/json" },
-    body: JSON.stringify({ url: inputPath }),
-    signal,
-  });
+  onProgress?.(5)
+  const ts = Date.now()
+  const inputDlbPath = `dlb://input/${ts}_${filename}`
+  const outputDlbPath = `dlb://output/${ts}_enhanced_${filename}`
 
-  if (!uploadRes.ok) {
-    const err = await uploadRes.text();
-    throw new Error(`Dolby upload URL error (${uploadRes.status}): ${err}`);
-  }
+  // Upload
+  const uploadRes = await fetch('https://api.dolby.com/media/input', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: inputDlbPath }),
+  })
+  if (!uploadRes.ok) throw new Error(`Input URL: ${uploadRes.status}`)
+  const { url: uploadUrl } = await uploadRes.json()
 
-  const { url: uploadUrl }: DolbyUploadResponse = await uploadRes.json();
+  await fetch(uploadUrl, { method: 'PUT', headers: { 'Content-Type': mime }, body: file, signal })
 
-  // 2. Upload audio
-  const putRes = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: { "Content-Type": blob.type || "audio/mpeg" },
-    body: blob,
-    signal,
-  });
-  if (!putRes.ok) throw new Error(`Dolby PUT failed: ${putRes.status}`);
+  onProgress?.(10)
 
-  // 3. Start enhance job
-  const enhanceRes = await fetch(`${DOLBY_BASE}/media/enhance`, {
-    method: "POST",
-    headers: { Authorization: auth, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      input: inputPath,
-      output: outputPath,
-      audio: {
-        noise: { reduction: { enable: true } },
-        loudness: { enable: true },
-        speech: { isolation: { enable: true } },
-      },
-    }),
-    signal,
-  });
+  const jobId = await startEnhance(token, inputDlbPath, outputDlbPath, settings.noiseReduction)
 
-  if (!enhanceRes.ok) {
-    const err = await enhanceRes.text();
-    throw new Error(`Dolby enhance error (${enhanceRes.status}): ${err}`);
-  }
+  await pollJob(token, jobId, p => onProgress?.(10 + p * 0.8), signal)
 
-  const { job_id }: DolbyEnhanceResponse = await enhanceRes.json();
+  onProgress?.(92)
 
-  // 4. Poll job status
-  let attempts = 0;
-  while (attempts < 120) {
-    if (signal?.aborted) throw new DOMException("Cancelled", "AbortError");
-    await sleep(3000);
+  // Get download URL
+  const dlRes = await fetch(
+    `https://api.dolby.com/media/output?url=${encodeURIComponent(outputDlbPath)}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  )
+  if (!dlRes.ok) throw new Error(`Output URL: ${dlRes.status}`)
+  const { url: downloadUrl } = await dlRes.json()
 
-    const statusRes = await fetch(`${DOLBY_BASE}/media/enhance?job_id=${job_id}`, {
-      headers: { Authorization: auth },
-      signal,
-    });
-    const status: DolbyJobStatus = await statusRes.json();
-    onProgress?.(status.progress ?? 0);
+  const audioRes = await fetch(downloadUrl, { signal })
+  if (!audioRes.ok) throw new Error(`Download failed: ${audioRes.status}`)
 
-    if (status.status === "Success") {
-      const outputRes = await fetch(
-        `${DOLBY_BASE}/media/output?url=${encodeURIComponent(outputPath)}`,
-        { headers: { Authorization: auth }, signal }
-      );
-      if (!outputRes.ok) throw new Error("Dolby output fetch failed");
-      const { url: downloadUrl }: { url: string } = await outputRes.json();
-      const audioRes = await fetch(downloadUrl, { signal });
-      return await audioRes.blob();
-    }
-
-    if (status.status === "Failed") throw new Error("Dolby enhance job failed");
-    attempts++;
-  }
-
-  throw new Error("Dolby enhance timed out");
+  onProgress?.(99)
+  return audioRes.blob()
 }
 
-/** APIキーの疎通確認 */
-export async function testDolbyKey(appKey: string, appSecret: string): Promise<{ ok: boolean; error?: string }> {
+export async function testDolbyConnection(appKey: string, appSecret: string): Promise<boolean> {
   try {
-    const res = await fetch(`${DOLBY_BASE}/media/input`, {
-      method: "POST",
-      headers: { Authorization: authHeader(appKey, appSecret), "Content-Type": "application/json" },
-      body: JSON.stringify({ url: "dlb://input/test_ping" }),
-    });
-    if (res.status === 401 || res.status === 403) {
-      return { ok: false, error: "認証エラー。App KeyとApp Secretを確認してください。" };
-    }
-    return { ok: true };
+    const token = await getToken(appKey, appSecret)
+    return !!token
   } catch {
-    return { ok: false, error: "接続エラー。ネットワークを確認してください。" };
+    return false
   }
 }

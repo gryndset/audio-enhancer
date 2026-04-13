@@ -1,81 +1,37 @@
-"use client";
+'use client'
+
+export type StepStatus = 'pending' | 'active' | 'done' | 'error'
 
 export interface Step {
-  label: string;
-  progress: number; // 0-100
-  status: "waiting" | "running" | "done" | "error";
-  detail?: string;
+  id: string
+  name: string
+  desc?: string
+  status: StepStatus
+  timeMs?: number
 }
 
-interface Props {
-  steps: Step[];
-}
-
-const statusIcon = (s: Step["status"]) => {
-  if (s === "done") return "✓";
-  if (s === "error") return "✕";
-  if (s === "running") return "⟳";
-  return "·";
-};
+interface Props { steps: Step[] }
 
 export default function ProgressSteps({ steps }: Props) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      {steps.map((step, i) => (
-        <div key={i}>
-          <div style={{
-            display: "flex",
-            justifyContent: "space-between",
-            marginBottom: "0.375rem",
-            fontSize: "0.85rem",
-          }}>
-            <span style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              fontWeight: 500,
-              color: step.status === "waiting" ? "var(--text-secondary)" : "var(--text-primary)",
-            }}>
-              <span style={{
-                display: "inline-flex",
-                width: 20, height: 20,
-                borderRadius: "50%",
-                background: step.status === "done"
-                  ? "var(--accent-primary)"
-                  : step.status === "error"
-                  ? "#ef4444"
-                  : step.status === "running"
-                  ? "var(--accent-secondary)"
-                  : "var(--border)",
-                color: step.status === "waiting" ? "var(--text-secondary)" : "var(--button-text)",
-                fontSize: "0.7rem",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-                animation: step.status === "running" ? "spin 1s linear infinite" : "none",
-              }}>
-                {statusIcon(step.status)}
-              </span>
-              <span>Step {i + 1}/{steps.length}　{step.label}</span>
-            </span>
-            <span style={{ color: "var(--text-secondary)", fontSize: "0.8rem" }}>
-              {step.progress}%
-            </span>
+    <div className="step-list">
+      {steps.map(step => (
+        <div key={step.id} className="step-item">
+          <div className={`step-dot ${step.status}`}>
+            {step.status === 'active' ? <span className="spin">◌</span>
+              : step.status === 'done' ? '✓'
+              : step.status === 'error' ? '✕'
+              : '○'}
           </div>
-          <div className="progress-track">
-            <div
-              className="progress-fill"
-              style={{ width: `${step.progress}%` }}
-            />
+          <div style={{ flex: 1 }}>
+            <div className="step-name">{step.name}</div>
+            {step.desc && <div className="step-desc">{step.desc}</div>}
+            {step.timeMs !== undefined && step.status === 'done' && (
+              <div className="step-time">{(step.timeMs / 1000).toFixed(1)}s</div>
+            )}
           </div>
-          {step.detail && (
-            <p style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginTop: "0.25rem" }}>
-              {step.detail}
-            </p>
-          )}
         </div>
       ))}
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
-  );
+  )
 }

@@ -1,135 +1,132 @@
-// FIX #5: "use client" 追加 → Next.js App Router の SSR で idb (ブラウザAPI) がクラッシュするのを防ぐ
-"use client";
+'use client'
 
-import { openDB, DBSchema, IDBPDatabase } from "idb";
+import { openDB, type IDBPDatabase } from 'idb'
 
-export interface HistoryItem {
-  id: string;
-  fileName: string;
-  processedAt: number;
-  fileSize: number;
-  // FIX #10: Blob → ArrayBuffer で保存（Safariの Blob シリアライズ問題を回避）
-  enhancedBuffer: ArrayBuffer | null;
-  outputFormat: "mp3" | "wav";
-  transcript: string | null;
-  status: "success" | "error";
-  // 後方互換: 旧データ読み出し用
-  enhancedBlob?: Blob | null;
+export interface HistoryEntry {
+  id: string
+  filename: string
+  duration: number
+  fileSize: number
+  processedAt: number
+  engine: string
+  language: string
+  mode: string
+  transcript: Array<{ start: number; end: number; text: string }>
+  summary: string
+  enhancedAudioB64: string | null
+  enhancedMime: string
+  processingTime: number
+  checksum: string
 }
 
-interface AudioDB extends DBSchema {
-  history: {
-    key: string;
-    value: HistoryItem;
-    indexes: { by_date: number };
-  };
+export interface CheckpointData {
+  id: string
+  fileB64: string
+  fileMime: string
+  filename: string
+  fileSize: number
+  dolboDone: boolean
+  enhancedB64: string | null
+  transcriptChunks: Array<{ start: number; end: number; text: string }>
+  currentChunk: number
+  totalChunks: number
+  updatedAt: number
 }
 
-const DB_NAME = "audio-enhancer-db";
-const DB_VERSION = 2; // Blob→ArrayBuffer 移行のためバージョンアップ
-const MAX_ITEMS = 20;
+let dbPromise: Promise<IDBPDatabase> | null = null
 
-let db: IDBPDatabase<AudioDB> | null = null;
-
-async function getDB() {
-  if (db) return db;
-  db = await openDB<AudioDB>(DB_NAME, DB_VERSION, {
-    upgrade(database, oldVersion) {
-      if (oldVersion < 1) {
-        const store = database.createObjectStore("history", { keyPath: "id" });
-        store.createIndex("by_date", "processedAt");
-      }
-      // v1→v2: スキーマ変更なし（フィールド追加は後方互換）
-    },
-  });
-  return db;
+function getDB() {
+  if (typeof window === 'undefined') throw new Error('IndexedDB not available on server')
+  if (!dbPromise) {
+    dbPromise = openDB('audio-enhancer-v4', 2, {
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore('history', { keyPath: 'id' })
+        }
+        if (oldVersion < 2) {
+          db.createObjectStore('checkpoints', { keyPath: 'id' })
+        }
+      },
+    })
+  }
+  return dbPromise
 }
 
-// Blob → ArrayBuffer 変換ヘルパー
-async function blobToBuffer(blob: Blob): Promise<ArrayBuffer> {
-  return blob.arrayBuffer();
+export async function saveHistory(entry: HistoryEntry) {
+  const db = await getDB()
+  await db.put('history', entry)
 }
 
-// ArrayBuffer → Blob 復元ヘルパー
-function bufferToBlob(buf: ArrayBuffer, format: "mp3" | "wav"): Blob {
-  return new Blob([buf], { type: format === "mp3" ? "audio/mpeg" : "audio/wav" });
+export async function getHistory(): Promise<HistoryEntry[]> {
+  const db = await getDB()
+  const all = await db.getAll('history')
+  return all.sort((a, b) => b.processedAt - a.processedAt)
 }
 
-export async function saveHistory(item: {
-  id: string;
-  fileName: string;
-  processedAt: number;
-  fileSize: number;
-  enhancedBlob: Blob | null;
-  transcript: string | null;
-  outputFormat: "mp3" | "wav";
-  status: "success" | "error";
-}): Promise<void> {
-  const database = await getDB();
+export async function deleteHistory(id: string) {
+  const db = await getDB()
+  await db.delete('history', id)
+}
 
-  // FIX #10: Blob を ArrayBuffer に変換してから保存
-  const enhancedBuffer = item.enhancedBlob ? await blobToBuffer(item.enhancedBlob) : null;
+export async function getHistoryById(id: string): Promise<HistoryEntry | undefined> {
+  const db = await getDB()
+  return db.get('history', id)
+}
 
-  await database.put("history", {
-    id: item.id,
-    fileName: item.fileName,
-    processedAt: item.processedAt,
-    fileSize: item.fileSize,
-    enhancedBuffer,
-    outputFormat: item.outputFormat,
-    transcript: item.transcript,
-    status: item.status,
-  });
+export async function saveCheckpoint(cp: CheckpointData) {
+  const db = await getDB()
+  await db.put('checkpoints', cp)
+}
 
-  const all = await database.getAllFromIndex("history", "by_date");
-  if (all.length > MAX_ITEMS) {
-    const toDelete = all.slice(0, all.length - MAX_ITEMS);
-    const tx = database.transaction("history", "readwrite");
-    for (const old of toDelete) await tx.store.delete(old.id);
-    await tx.done;
+export async function getCheckpoint(id: string): Promise<CheckpointData | undefined> {
+  const db = await getDB()
+  return db.get('checkpoints', id)
+}
+
+export async function deleteCheckpoint(id: string) {
+  const db = await getDB()
+  await db.delete('checkpoints', id)
+}
+
+export async function getStorageEstimate(): Promise<{ used: number; quota: number } | null> {
+  if (typeof navigator === 'undefined' || !navigator.storage) return null
+  try {
+    const est = await navigator.storage.estimate()
+    return { used: est.usage ?? 0, quota: est.quota ?? 0 }
+  } catch {
+    return null
   }
 }
 
-// 読み出し時に enhancedBlob を復元して返す
-export async function getHistory(): Promise<(HistoryItem & { enhancedBlob: Blob | null })[]> {
-  const database = await getDB();
-  const all = await database.getAllFromIndex("history", "by_date");
-  return all.reverse().map((item) => ({
-    ...item,
-    enhancedBlob: item.enhancedBuffer
-      ? bufferToBlob(item.enhancedBuffer, item.outputFormat)
-      : (item.enhancedBlob ?? null), // 旧データ後方互換
-  }));
-}
-
-export async function deleteHistoryItem(id: string): Promise<void> {
-  const database = await getDB();
-  await database.delete("history", id);
-}
-
-export async function clearHistory(): Promise<void> {
-  const database = await getDB();
-  await database.clear("history");
-}
-
-export async function getStorageUsage(): Promise<number> {
-  try {
-    if (navigator.storage && navigator.storage.estimate) {
-      const { usage } = await navigator.storage.estimate();
-      return usage ?? 0;
+export function fileToBase64(file: File | Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result as string
+      resolve(result.split(',')[1])
     }
-  } catch {}
-  const items = await getHistory();
-  return items.reduce((acc, item) => {
-    const blobSize = item.enhancedBlob?.size ?? 0;
-    const textSize = item.transcript ? new Blob([item.transcript]).size : 0;
-    return acc + blobSize + textSize;
-  }, 0);
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
 }
 
-export function formatStorageSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+export function base64ToBlob(b64: string, mime: string): Blob {
+  const bytes = atob(b64)
+  const arr = new Uint8Array(bytes.length)
+  for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i)
+  return new Blob([arr], { type: mime })
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+export function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+  return `${m}:${String(s).padStart(2,'0')}`
 }

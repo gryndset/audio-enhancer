@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Allow: /settings
+Disallow: /history
+
+Sitemap: https://audio-enhancer.vercel.app/sitemap.xml
