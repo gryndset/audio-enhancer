@@ -1,0 +1,360 @@
+/* ===== THEMES ===== */
+
+/* Default: Clean */
+:root,
+[data-theme="clean"] {
+  --bg-primary: #F8F9FA;
+  --bg-secondary: #F1F3F5;
+  --bg-card: #FFFFFF;
+  --accent-primary: #4A6CF7;
+  --accent-secondary: #6A8AFB;
+  --text-primary: #1A1A2E;
+  --text-secondary: #6C757D;
+  --border: #E9ECEF;
+  --button-bg: #4A6CF7;
+  --button-text: #FFFFFF;
+  --progress-bar: linear-gradient(90deg, #4A6CF7, #6A8AFB);
+  --font: 'Inter', 'Noto Sans JP', sans-serif;
+  --radius-card: 12px;
+  --radius-btn: 8px;
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+  --glow: none;
+}
+
+[data-theme="kawaii"] {
+  --bg-primary: #FFF0F5;
+  --bg-secondary: #FFE4EF;
+  --bg-card: #FFFFFF;
+  --accent-primary: #FF6B9D;
+  --accent-secondary: #FF9EC4;
+  --text-primary: #3D1A2E;
+  --text-secondary: #8B4D6F;
+  --border: #FFCCE0;
+  --button-bg: #FF6B9D;
+  --button-text: #FFFFFF;
+  --progress-bar: linear-gradient(90deg, #FF6B9D, #FF9EC4);
+  --font: 'M PLUS Rounded 1c', 'Noto Sans JP', sans-serif;
+  --radius-card: 24px;
+  --radius-btn: 9999px;
+  --shadow-card: 0 4px 20px rgba(255, 107, 157, 0.15);
+  --glow: none;
+}
+
+[data-theme="hiphop"] {
+  --bg-primary: #0A0A0A;
+  --bg-secondary: #111111;
+  --bg-card: #1A1A1A;
+  --accent-primary: #00FF88;
+  --accent-secondary: #00CC6A;
+  --text-primary: #FFFFFF;
+  --text-secondary: #888888;
+  --border: #2A2A2A;
+  --button-bg: #00FF88;
+  --button-text: #000000;
+  --progress-bar: linear-gradient(90deg, #00FF88, #00FFFF);
+  --font: 'Space Grotesk', 'Noto Sans JP', sans-serif;
+  --radius-card: 4px;
+  --radius-btn: 4px;
+  --shadow-card: 0 0 20px rgba(0, 255, 136, 0.08);
+  --glow: 0 0 20px rgba(0, 255, 136, 0.15);
+}
+
+/* ===== GLOBAL BASE ===== */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-family: var(--font);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+body {
+  min-height: 100vh;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font);
+}
+
+/* ===== CARD ===== */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 1.5rem;
+  transition: box-shadow 0.2s ease;
+}
+
+/* ===== BUTTON ===== */
+.btn-primary {
+  background: var(--button-bg);
+  color: var(--button-text);
+  border: none;
+  border-radius: var(--radius-btn);
+  padding: 0.75rem 1.5rem;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.88;
+  transform: translateY(-1px);
+}
+
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-primary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  padding: 0.75rem 1.5rem;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.btn-secondary:hover {
+  background: var(--bg-secondary);
+}
+
+.btn-icon {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  padding: 0.5rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.btn-icon:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+/* ===== PROGRESS BAR ===== */
+.progress-track {
+  width: 100%;
+  height: 8px;
+  background: var(--bg-secondary);
+  border-radius: 9999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--progress-bar);
+  border-radius: 9999px;
+  transition: width 0.4s ease;
+}
+
+/* ===== INPUT ===== */
+.input-field {
+  width: 100%;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  padding: 0.75rem 1rem;
+  font-family: var(--font);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.input-field:focus {
+  border-color: var(--accent-primary);
+}
+
+/* ===== TOGGLE ===== */
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--border);
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--accent-primary);
+}
+
+.toggle input:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+
+/* ===== TOAST ===== */
+.toast {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  padding: 0.875rem 1.25rem;
+  font-size: 0.875rem;
+  z-index: 999;
+  animation: slideIn 0.25s ease;
+  max-width: 320px;
+}
+
+@keyframes slideIn {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* ===== DROP ZONE ===== */
+.drop-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-card);
+  padding: 3rem 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.drop-zone:hover,
+.drop-zone.dragging {
+  border-color: var(--accent-primary);
+  background: var(--bg-secondary);
+}
+
+/* HipHop animated border */
+[data-theme="hiphop"] .drop-zone {
+  position: relative;
+  border: none;
+  background: var(--bg-card);
+}
+
+[data-theme="hiphop"] .drop-zone::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-card);
+  padding: 2px;
+  background: linear-gradient(90deg, #00FF88, #00FFFF, #00FF88);
+  background-size: 200% 100%;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: borderAnim 3s linear infinite;
+}
+
+@keyframes borderAnim {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+/* ===== AUDIO PLAYER ===== */
+.audio-player {
+  width: 100%;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-btn);
+  padding: 0.5rem;
+}
+
+/* ===== NAV ===== */
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  padding: 0.5rem 0;
+  z-index: 100;
+}
+
+.bottom-nav a {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: var(--radius-btn);
+  transition: color 0.15s ease;
+}
+
+.bottom-nav a.active,
+.bottom-nav a:hover {
+  color: var(--accent-primary);
+}
+
+/* ===== HIPHOP EXTRAS ===== */
+[data-theme="hiphop"] .card {
+  box-shadow: var(--glow);
+}
+
+[data-theme="hiphop"] h1,
+[data-theme="hiphop"] h2,
+[data-theme="hiphop"] .label-upper {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ===== UTILITY ===== */
+.text-accent { color: var(--accent-primary); }
+.text-secondary { color: var(--text-secondary); }
+.bg-secondary { background: var(--bg-secondary); }
+.border-color { border-color: var(--border); }
